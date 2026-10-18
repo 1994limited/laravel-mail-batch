@@ -2,6 +2,7 @@
 
 namespace NineteenNinetyFour\MailBatch;
 
+use Closure;
 use Illuminate\Mail\Events\MessageSending;
 use Illuminate\Mail\Mailer;
 use Illuminate\Notifications\ChannelManager;
@@ -10,7 +11,10 @@ use Illuminate\Support\Testing\Fakes\NotificationFake;
 use NineteenNinetyFour\MailBatch\Capture\MessageMetadata;
 use NineteenNinetyFour\MailBatch\Notifications\NotificationBatcher;
 use NineteenNinetyFour\MailBatch\Testing\BatchRecorder;
+use NineteenNinetyFour\MailBatch\Transport\PostmarkBatchTransport;
 use NineteenNinetyFour\MailBatch\Transport\ResendBatchTransport;
+use Symfony\Component\HttpClient\HttpClient;
+use Symfony\Component\Mailer\Bridge\Postmark\Transport\PostmarkApiTransport;
 
 /**
  * Registers the batch APIs without replacing any of Laravel's own services.
@@ -71,6 +75,7 @@ class MailBatchServiceProvider extends ServiceProvider
         });
 
         $this->registerResendTransport();
+        $this->registerPostmarkTransport();
     }
 
     /**
@@ -82,15 +87,46 @@ class MailBatchServiceProvider extends ServiceProvider
             return;
         }
 
-        $register = function ($manager) {
-            if (! method_exists($manager, 'extend')) {
-                return;
+        $this->extendMailManager('resend-batch', fn (array $config) => new ResendBatchTransport(
+            \Resend::client($config['key'] ?? $this->app['config']->get('services.resend.key')),
+            $config['batch_validation'] ?? 'permissive',
+        ));
+    }
+
+    /**
+     * Register the "postmark-batch" mail transport when Symfony's Postmark mailer is installed.
+     */
+    protected function registerPostmarkTransport(): void
+    {
+        if (! class_exists(PostmarkApiTransport::class)) {
+            return;
+        }
+
+        $this->extendMailManager('postmark-batch', function (array $config) {
+            $transport = new PostmarkBatchTransport(
+                $config['token'] ?? $config['key']
+                    ?? $this->app['config']->get('services.postmark.token')
+                    ?? $this->app['config']->get('services.postmark.key'),
+                isset($config['client']) ? HttpClient::create($config['client']) : null,
+            );
+
+            if (isset($config['message_stream_id'])) {
+                $transport->setMessageStream($config['message_stream_id']);
             }
 
-            $manager->extend('resend-batch', fn (array $config) => new ResendBatchTransport(
-                \Resend::client($config['key'] ?? $this->app['config']->get('services.resend.key')),
-                $config['batch_validation'] ?? 'permissive',
-            ));
+            return $transport;
+        });
+    }
+
+    /**
+     * Register a mail transport, whether or not the mail manager has been resolved yet.
+     */
+    protected function extendMailManager(string $transport, Closure $callback): void
+    {
+        $register = function ($manager) use ($transport, $callback) {
+            if (method_exists($manager, 'extend')) {
+                $manager->extend($transport, $callback);
+            }
         };
 
         if ($this->app->resolved('mail.manager')) {

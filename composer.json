@@ -1,7 +1,14 @@
 {
     "name": "1994/laravel-mail-batch",
     "description": "Send mail and notifications in batches, paced to your provider's rate limits.",
-    "keywords": ["laravel", "mail", "batch", "notifications", "resend", "rate limit"],
+    "keywords": [
+        "laravel",
+        "mail",
+        "batch",
+        "notifications",
+        "resend",
+        "rate limit"
+    ],
     "type": "library",
     "license": "MIT",
     "authors": [
@@ -25,10 +32,14 @@
         "laravel/pint": "^1.18",
         "orchestra/testbench": "^11.0",
         "phpunit/phpunit": "^12.0|^13.0",
-        "resend/resend-php": "^1.0"
+        "resend/resend-php": "^1.0",
+        "symfony/http-client": "^7.4|^8.0",
+        "symfony/postmark-mailer": "^7.4|^8.0"
     },
     "suggest": {
-        "resend/resend-php": "Required to use the resend-batch mail transport (^1.0)."
+        "resend/resend-php": "Required to use the resend-batch mail transport (^1.0).",
+        "symfony/postmark-mailer": "Required to use the postmark-batch mail transport (^7.4|^8.0).",
+        "symfony/http-client": "Required to use the postmark-batch mail transport (^7.4|^8.0)."
     },
     "autoload": {
         "psr-4": {
