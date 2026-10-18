@@ -1,0 +1,59 @@
+{
+    "name": "1994/laravel-mail-batch",
+    "description": "Send mail and notifications in batches, paced to your provider's rate limits.",
+    "keywords": ["laravel", "mail", "batch", "notifications", "resend", "rate limit"],
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Daniel Jones",
+            "email": "daniel@1994.co.uk"
+        }
+    ],
+    "require": {
+        "php": "^8.3",
+        "illuminate/bus": "^13.0",
+        "illuminate/collections": "^13.0",
+        "illuminate/contracts": "^13.0",
+        "illuminate/events": "^13.0",
+        "illuminate/mail": "^13.0",
+        "illuminate/notifications": "^13.0",
+        "illuminate/queue": "^13.0",
+        "illuminate/support": "^13.0"
+    },
+    "require-dev": {
+        "laravel/pint": "^1.18",
+        "orchestra/testbench": "^11.0",
+        "phpunit/phpunit": "^12.0|^13.0",
+        "resend/resend-php": "^1.0"
+    },
+    "suggest": {
+        "resend/resend-php": "Required to use the resend-batch mail transport (^1.0)."
+    },
+    "autoload": {
+        "psr-4": {
+            "NineteenNinetyFour\\MailBatch\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "NineteenNinetyFour\\MailBatch\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "NineteenNinetyFour\\MailBatch\\MailBatchServiceProvider"
+            ]
+        }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "lint": "pint"
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
