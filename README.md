@@ -38,6 +38,15 @@ composer require resend/resend-php
 
 `resend-batch` sends single emails the way the `resend` transport does, so you can use it as your only Resend mailer. Emails with attachments are sent one at a time, because Resend's batch endpoint doesn't accept attachments.
 
+`batch_validation` controls what Resend does when some emails in a batch request are invalid, such as an email with a malformed address:
+
+| Value | What Resend does | Effect on the result |
+|---|---|---|
+| `permissive` (default) | Sends the valid emails and reports the invalid ones. | Only the invalid emails are listed in `$result->failures()`, and only their notifiables get `NotificationFailed`. |
+| `strict` | Rejects the whole request if any email is invalid, so nothing in it is sent. | Every email in the request fails. |
+
+`permissive` is the default because it gives a result for each message. Be careful with `strict` and queued notifications: one invalid address fails the whole batch, so the job is retried and fails the same way every time until it runs out of tries.
+
 ## Sending mail in batches
 
 ```php
