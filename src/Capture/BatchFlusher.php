@@ -12,7 +12,6 @@ use NineteenNinetyFour\MailBatch\BatchResult;
 use NineteenNinetyFour\MailBatch\Contracts\BatchTransport;
 use NineteenNinetyFour\MailBatch\Exceptions\BatchListenerException;
 use NineteenNinetyFour\MailBatch\PendingBatch;
-use Symfony\Component\Mailer\Exception\TransportException;
 use Symfony\Component\Mailer\SentMessage as SymfonySentMessage;
 use Symfony\Component\Mailer\Transport\TransportInterface;
 use Throwable;
@@ -41,7 +40,7 @@ class BatchFlusher
      */
     public function flush(PendingBatch $batch, TransportInterface $transport, array $messages): BatchResult
     {
-        $sent = $failures = [];
+        $sent = $failures = $declined = [];
 
         $requests = 0;
 
@@ -54,9 +53,13 @@ class BatchFlusher
 
             $chunk = array_intersect_key($messages, array_flip($indexes));
 
-            // A retried request is sent with the same idempotency key as the first attempt,
-            // so a provider that supports one won't deliver the messages a second time.
-            $options = ['idempotency_key' => (string) Str::uuid()];
+            // A retried request is sent with the same idempotency key as the first attempt, so a
+            // provider that supports one won't deliver the messages a second time. A batch given
+            // a key of its own, such as a queued job's, derives the key of each of its requests
+            // from it, so the requests keep their keys when the whole job is retried.
+            $options = ['idempotency_key' => is_null($batch->getIdempotencyKey())
+                ? (string) Str::uuid()
+                : $batch->getIdempotencyKey().'-'.$i];
 
             try {
                 $results = retry(
@@ -82,6 +85,8 @@ class BatchFlusher
             foreach ($results as $index => $result) {
                 if ($result instanceof Throwable) {
                     $failures[$index] = $result;
+                } elseif (is_null($result)) {
+                    $declined[] = $index;
                 } else {
                     $sent[$index] = $sentInRequest[$index] = new SentMessage($result);
                 }
@@ -101,7 +106,9 @@ class BatchFlusher
         ksort($sent);
         ksort($failures);
 
-        $result = new BatchResult($sent, $failures, $requests);
+        sort($declined);
+
+        $result = new BatchResult($sent, $failures, $requests, $declined);
 
         if ($listenerException) {
             throw new BatchListenerException($result, $listenerException);
@@ -166,7 +173,7 @@ class BatchFlusher
      *
      * @param  array<int, CapturedMessage>  $messages
      * @param  array{idempotency_key?: string}  $options
-     * @return array<int, SymfonySentMessage|Throwable>
+     * @return array<int, SymfonySentMessage|Throwable|null>
      */
     protected function send(TransportInterface $transport, array $messages, array $options, int &$requests): array
     {
@@ -175,8 +182,7 @@ class BatchFlusher
 
             $requests++;
 
-            return [$index => $transport->send($messages[$index]->message, $messages[$index]->envelope)
-                ?? new TransportException('The message was not sent by the transport.')];
+            return [$index => $transport->send($messages[$index]->message, $messages[$index]->envelope)];
         }
 
         // Like the transport's own "send" method, each message is cloned so that changes made

@@ -23,6 +23,8 @@ use NineteenNinetyFour\MailBatch\Attributes\BatchMail;
 use NineteenNinetyFour\MailBatch\Capture\CapturingTransport;
 use NineteenNinetyFour\MailBatch\Contracts\BatchTransport;
 
+use function Illuminate\Support\enum_value;
+
 /**
  * Queues a notification for many notifiables, sending its mail in batches.
  *
@@ -61,35 +63,39 @@ class QueuedNotificationBatch
 
         $batchable = [];
 
-        foreach ($notifiables as $notifiable) {
-            $notificationId = (string) Str::uuid();
+        try {
+            foreach ($notifiables as $notifiable) {
+                $notificationId = (string) Str::uuid();
 
-            foreach ((array) $original->via($notifiable) as $channel) {
-                $notification = clone $original;
+                foreach ((array) $original->via($notifiable) as $channel) {
+                    $notification = clone $original;
 
-                if (! $notification->id) {
-                    $notification->id = $notificationId;
+                    if (! $notification->id) {
+                        $notification->id = $notificationId;
+                    }
+
+                    if (! is_null($this->locale)) {
+                        $notification->locale = $this->locale;
+                    }
+
+                    $options = $this->queueOptions($notifiable, $notification, $channel);
+
+                    // A deduplicator applies to a single notifiable's job, so those jobs aren't grouped.
+                    if ($this->isMailChannel($channel) && is_null($options['deduplicator'])) {
+                        $batchable[] = [$notifiable, $notification, $channel, $options];
+
+                        continue;
+                    }
+
+                    $this->dispatch($notifiable, $notification, $channel, $options);
                 }
-
-                if (! is_null($this->locale)) {
-                    $notification->locale = $this->locale;
-                }
-
-                $options = $this->queueOptions($notifiable, $notification, $channel);
-
-                // A deduplicator applies to a single notifiable's job, so those jobs aren't grouped.
-                if ($this->isMailChannel($channel) && is_null($options['deduplicator'])) {
-                    $batchable[] = [$notifiable, $notification, $channel, $options];
-
-                    continue;
-                }
-
-                $this->dispatch($notifiable, $notification, $channel, $options);
             }
-        }
-
-        if ($batchable !== []) {
-            $this->queueMailChunks($batchable, $original);
+        } finally {
+            // The mail jobs are queued even when queueing a later notifiable throws, as Laravel
+            // would already have queued them by then, before the exception is passed on.
+            if ($batchable !== []) {
+                $this->queueMailChunks($batchable);
+            }
         }
     }
 
@@ -100,7 +106,7 @@ class QueuedNotificationBatch
      * @param  mixed  $notification
      * @return array{connection: mixed, queue: mixed, delay: mixed, messageGroup: mixed, deduplicator: mixed, middleware: array}
      */
-    protected function queueOptions($notifiable, $notification, string $channel): array
+    protected function queueOptions($notifiable, $notification, mixed $channel): array
     {
         $connection = $this->getAttributeValue($notification, Connection::class, 'connection')
             ?? $this->manager->resolveConnectionFromQueueRoute($notification)
@@ -156,26 +162,35 @@ class QueuedNotificationBatch
     /**
      * Queue the mail in jobs that each send it to a chunk of notifiables.
      *
-     * @param  array<int, array{0: mixed, 1: mixed, 2: string, 3: array}>  $batchable
-     * @param  mixed  $original
+     * Notifiables are grouped only when their jobs would be queued with the same options,
+     * their notification is in the same state, and they would be serialized the same way.
+     *
+     * @param  array<int, array{0: mixed, 1: mixed, 2: mixed, 3: array}>  $batchable
      */
-    protected function queueMailChunks(array $batchable, $original): void
+    protected function queueMailChunks(array $batchable): void
     {
         $groups = [];
 
         foreach ($batchable as [$notifiable, $notification, $channel, $options]) {
-            foreach ($groups as $key => $group) {
-                if ($group['channel'] === $channel && $this->sameQueueOption($group['options'], $options)) {
-                    $groups[$key]['jobs'][] = [$notifiable, $notification];
+            $key = [
+                'channel' => $channel,
+                'options' => $options,
+                'notification' => $this->stateOf($notification),
+                'notifiable' => $this->serializationGroup($notifiable),
+            ];
+
+            foreach ($groups as $index => $group) {
+                if ($this->sameQueueOption($group['key'], $key)) {
+                    $groups[$index]['jobs'][] = [$notifiable, $notification];
 
                     continue 2;
                 }
             }
 
-            $groups[] = ['channel' => $channel, 'options' => $options, 'jobs' => [[$notifiable, $notification]]];
+            $groups[] = ['key' => $key, 'channel' => $channel, 'options' => $options, 'jobs' => [[$notifiable, $notification]]];
         }
 
-        [$size, $interval, $requestsPerChunk] = $this->pacing($this->batcher->attribute($original));
+        [$size, $interval, $requestsPerChunk] = $this->pacing($this->batcher->attribute($batchable[0][1]));
 
         // Every chunk sends through the same mailer, so the chunks are paced against a single
         // schedule, whichever group they're in. Each one is offset from its group's own delay.
@@ -196,17 +211,11 @@ class QueuedNotificationBatch
 
                 $notifiables = $this->wrapNotifiables(array_column($chunk, 0));
 
-                $notification = clone $original;
+                $notification = $this->stateOf($chunk[0][1]);
 
-                if (! is_null($this->locale)) {
-                    $notification->locale = $this->locale;
-                }
-
-                $ids = [];
-
-                foreach ($notifiables as $key => $notifiable) {
-                    $ids[NotificationBatcher::notifiableIdKey($notifiables, $key, $notifiable)] = $chunk[$key][1]->id;
-                }
+                // The IDs are keyed by position. A collection of models restored from the queue
+                // keeps the position of each model, even when a deleted model is left out.
+                $ids = array_map(fn ($job) => $job[1]->id, $chunk);
 
                 $this->applyOptions(
                     new SendBatchedMailNotifications($notifiables, $notification, [$channel], $ids), $chunkOptions,
@@ -258,7 +267,7 @@ class QueuedNotificationBatch
      * @param  mixed  $notifiable
      * @param  mixed  $notification
      */
-    protected function dispatch($notifiable, $notification, string $channel, array $options): void
+    protected function dispatch($notifiable, $notification, mixed $channel, array $options): void
     {
         $this->applyOptions(
             $this->manager->getContainer()->make(SendQueuedNotifications::class, [
@@ -314,6 +323,36 @@ class QueuedNotificationBatch
     }
 
     /**
+     * Get a copy of the notification without its per-notifiable ID.
+     *
+     * @param  mixed  $notification
+     * @return mixed
+     */
+    protected function stateOf($notification)
+    {
+        $notification = clone $notification;
+
+        $notification->id = null;
+
+        return $notification;
+    }
+
+    /**
+     * Get the group of notifiables that may be serialized together with the given notifiable.
+     *
+     * A collection of models is serialized as model identifiers, which requires every model
+     * to be of the same class and on the same connection. Anything else is serialized as is.
+     *
+     * @param  mixed  $notifiable
+     */
+    protected function serializationGroup($notifiable): string
+    {
+        return $notifiable instanceof Model
+            ? get_class($notifiable).'@'.$notifiable->getConnectionName()
+            : 'value';
+    }
+
+    /**
      * Wrap a chunk of notifiables in a collection that can be serialized for the queue.
      */
     protected function wrapNotifiables(array $notifiables): Collection
@@ -346,8 +385,10 @@ class QueuedNotificationBatch
     /**
      * Determine if the channel is the mail channel.
      */
-    protected function isMailChannel(string $channel): bool
+    protected function isMailChannel(mixed $channel): bool
     {
-        return $channel === 'mail' || is_a($channel, MailChannel::class, true);
+        $channel = enum_value($channel);
+
+        return $channel === 'mail' || (is_string($channel) && is_a($channel, MailChannel::class, true));
     }
 }

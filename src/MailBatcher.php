@@ -8,15 +8,27 @@ use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Mail\Mailable;
 use Illuminate\Mail\Mailer;
 use Illuminate\Support\Testing\Fakes\MailFake;
+use LogicException;
 use NineteenNinetyFour\MailBatch\Capture\BatchFlusher;
+use NineteenNinetyFour\MailBatch\Capture\Capture;
 use NineteenNinetyFour\MailBatch\Capture\CapturingTransport;
+use NineteenNinetyFour\MailBatch\Capture\Context;
+use NineteenNinetyFour\MailBatch\Exceptions\BatchListenerException;
 use NineteenNinetyFour\MailBatch\Testing\BatchRecorder;
+use Throwable;
 
 /**
  * @mixin BatchRecorder
  */
 class MailBatcher
 {
+    /**
+     * The contexts that have a batch open on the mail fake.
+     *
+     * @var array<string, true>
+     */
+    protected array $fakeCaptures = [];
+
     /**
      * Create a new mail batcher instance.
      */
@@ -95,7 +107,7 @@ class MailBatcher
      *
      * @internal
      *
-     * @throws \LogicException
+     * @throws LogicException
      */
     public function run(PendingBatch $batch, Closure $callback): BatchResult
     {
@@ -122,7 +134,31 @@ class MailBatcher
             }
         }
 
-        return (new BatchFlusher($this->events))->flush($batch, $transport->getTransport(), $capture->messages());
+        try {
+            $result = (new BatchFlusher($this->events))->flush($batch, $transport->getTransport(), $capture->messages());
+        } catch (BatchListenerException $e) {
+            $capture->sent($e->result);
+
+            throw $e;
+        }
+
+        if ($exception = $capture->sent($result)) {
+            throw $exception;
+        }
+
+        return $result;
+    }
+
+    /**
+     * Get the capture open on the given mailer for the current coroutine or fiber, if any.
+     *
+     * @internal
+     */
+    public function currentCapture(Mailer $mailer): ?Capture
+    {
+        $transport = $mailer->getSymfonyTransport();
+
+        return $transport instanceof CapturingTransport ? $transport->current() : null;
     }
 
     /**
@@ -166,18 +202,41 @@ class MailBatcher
      */
     protected function runFake(PendingBatch $batch, MailFake $fake, Closure $callback): BatchResult
     {
-        $mailables = fn () => $this->mailables;
+        $mailables = Closure::bind(function (?int $length = null) {
+            if (! is_null($length)) {
+                $this->mailables = array_slice($this->mailables, 0, $length);
+            }
 
-        $before = count(Closure::bind($mailables, $fake, MailFake::class)());
+            return $this->mailables;
+        }, $fake, MailFake::class);
 
-        $callback($fake);
+        $context = Context::key();
+
+        if (isset($this->fakeCaptures[$context])) {
+            throw new LogicException('A batch is already in progress on this mailer.');
+        }
+
+        $this->fakeCaptures[$context] = true;
+
+        $before = count($mailables());
+
+        try {
+            $callback($fake);
+        } catch (Throwable $e) {
+            // Like the real mailer, nothing captured by a batch whose callback throws is sent.
+            $mailables($before);
+
+            throw $e;
+        } finally {
+            unset($this->fakeCaptures[$context]);
+        }
 
         $name = $batch->getMailerName();
 
         // Like the real mailer, only mail sent with the batch's mailer is part of the batch.
         // Mail sent with another mailer is recorded by the fake as an ordinary send.
         $this->recorder->record($name, array_values(array_filter(
-            array_slice(Closure::bind($mailables, $fake, MailFake::class)(), $before),
+            array_slice($mailables(), $before),
             fn ($mailable) => in_array($mailable->mailer ?? null, [null, $name], true)
                 || ($mailable->mailer === $this->defaultMailer() && $name === $this->defaultMailer()),
         )));

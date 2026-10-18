@@ -14,10 +14,12 @@ use Illuminate\Notifications\Events\NotificationSent;
 use Illuminate\Notifications\Events\NotificationSkipped;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
+use Illuminate\Support\Testing\Fakes\MailFake;
 use Illuminate\Support\Traits\Localizable;
 use NineteenNinetyFour\MailBatch\Attributes\BatchMail;
 use NineteenNinetyFour\MailBatch\BatchResult;
 use NineteenNinetyFour\MailBatch\Exceptions\BatchListenerException;
+use NineteenNinetyFour\MailBatch\Exceptions\BatchSendException;
 use NineteenNinetyFour\MailBatch\MailBatcher;
 use Symfony\Component\Mailer\Exception\HttpTransportException;
 use Symfony\Component\Mailer\Exception\TransportException;
@@ -41,6 +43,11 @@ class SyncNotificationBatch
     protected ?BatchMail $attribute = null;
 
     /**
+     * Indicates if mail is faked.
+     */
+    protected bool $faked = false;
+
+    /**
      * The mailer whose batch captures the notification's mail, while the batch is open.
      */
     protected ?Mailer $mailer = null;
@@ -53,7 +60,7 @@ class SyncNotificationBatch
     /**
      * The notifications whose mail has been captured, with the indexes of their messages.
      *
-     * @var array<int, array{0: mixed, 1: mixed, 2: string, 3: array<int, int>}>
+     * @var array<int, array{0: mixed, 1: mixed, 2: mixed, 3: array<int, int>}>
      */
     protected array $batched = [];
 
@@ -79,7 +86,7 @@ class SyncNotificationBatch
      *
      * @throws Throwable
      */
-    public function send($notifiables, $notification, ?array $channels = null, array $ids = []): void
+    public function send($notifiables, $notification, ?array $channels = null, array $ids = [], ?string $idempotencyKey = null): void
     {
         $notifiables = NotificationBatcher::formatNotifiables($notifiables);
 
@@ -87,20 +94,29 @@ class SyncNotificationBatch
 
         $this->attribute = $this->batcher->attribute($original);
 
-        $mailer = $this->batcher->mailManager()->mailer($this->attribute?->mailer);
+        $manager = $this->batcher->mailManager();
 
-        // When mail is faked, or a batch is already open on the mailer, the notification is sent
-        // as Laravel would send it. Its mail is then recorded by the fake, or captured by the
-        // batch that's already open, which dispatches the mail's own events when it's sent.
-        if (! $mailer instanceof Mailer || $this->mail->capturing($mailer)) {
+        $this->faked = $manager instanceof MailFake;
+
+        $mailer = $manager->mailer($this->attribute?->mailer);
+
+        // When mail is faked the notification is sent as Laravel would send it, and its mail
+        // is recorded by the fake. Nothing is batched, so nothing reaches a real transport.
+        if (! $mailer instanceof Mailer) {
             $this->sendToNotifiables($notifiables, $original, $channels, $ids);
+
+            return;
+        }
+
+        if ($capture = $this->mail->currentCapture($mailer)) {
+            $this->sendWithinOpenBatch($capture, $mailer, $notifiables, $original, $channels, $ids);
 
             return;
         }
 
         $batch = $this->batcher->configure(
             $this->mail->pending($mailer, $this->attribute?->mailer), $this->attribute,
-        );
+        )->idempotencyKey($idempotencyKey);
 
         $exception = $listenerException = null;
 
@@ -125,7 +141,7 @@ class SyncNotificationBatch
             $listenerException = $e;
         }
 
-        $eventException = $this->dispatchBatchedEvents($result);
+        $eventException = $this->dispatchBatchedEvents($this->takeBatched(), $result);
 
         if ($thrown = $exception ?? $listenerException ?? $eventException) {
             throw $thrown;
@@ -134,8 +150,39 @@ class SyncNotificationBatch
         // When none of the messages could be sent, such as when the provider is unavailable,
         // the batch is failed as a whole so a queued job is retried. A partially sent batch
         // isn't, as retrying it would send the delivered messages a second time.
-        if ($result->failed() && $result->sent() === []) {
-            $result->throw();
+        if ($result->failed() && $result->sent() === [] && $result->declined() === []) {
+            throw new BatchSendException($result->withFailures(
+                array_map($this->normalizeException(...), $result->failures())
+            ));
+        }
+    }
+
+    /**
+     * Send the notification within a batch that is already open on the mailer.
+     *
+     * The mail joins that batch, and the sent and failed events are dispatched once the
+     * batch that's open has been sent, by whatever opened it.
+     *
+     * @param  Collection|array  $notifiables
+     * @param  mixed  $original
+     * @param  array<array-key, string>  $ids
+     */
+    protected function sendWithinOpenBatch($capture, Mailer $mailer, $notifiables, $original, ?array $channels, array $ids): void
+    {
+        $this->mailer = $mailer;
+
+        try {
+            $this->sendToNotifiables($notifiables, $original, $channels, $ids);
+        } finally {
+            $this->mailer = null;
+
+            if (($batched = $this->takeBatched()) !== []) {
+                $capture->afterSending(function (BatchResult $result) use ($batched) {
+                    if ($exception = $this->dispatchBatchedEvents($batched, $result)) {
+                        throw $exception;
+                    }
+                });
+            }
         }
     }
 
@@ -153,8 +200,7 @@ class SyncNotificationBatch
                 continue;
             }
 
-            $notificationId = $ids[NotificationBatcher::notifiableIdKey($notifiables, $key, $notifiable)]
-                ?? (string) Str::uuid();
+            $notificationId = $ids[$key] ?? (string) Str::uuid();
 
             $this->withLocale($this->preferredLocale($notifiable, $original), function () use ($viaChannels, $notifiable, $original, $notificationId) {
                 foreach ((array) $viaChannels as $channel) {
@@ -171,10 +217,11 @@ class SyncNotificationBatch
      *
      * @param  mixed  $notifiable
      * @param  mixed  $notification
+     * @param  mixed  $channel
      *
      * @throws Throwable
      */
-    protected function sendToNotifiable($notifiable, string $id, $notification, string $channel): void
+    protected function sendToNotifiable($notifiable, string $id, $notification, $channel): void
     {
         if (! $notification->id) {
             $notification->id = $id;
@@ -188,8 +235,6 @@ class SyncNotificationBatch
             return;
         }
 
-        $this->batcher->resetFailedEvent();
-
         try {
             $driver = $this->driver($channel);
 
@@ -201,11 +246,9 @@ class SyncNotificationBatch
 
             $response = $driver->send($notifiable, $notification);
         } catch (Throwable $exception) {
-            if (! $this->batcher->failedEventWasDispatched()) {
+            if (! $this->batcher->failedEventWasDispatchedFor($notification)) {
                 $exception = $this->dispatchFailedEvent($notifiable, $notification, $channel, $exception);
             }
-
-            $this->batcher->resetFailedEvent();
 
             throw $exception;
         }
@@ -225,34 +268,51 @@ class SyncNotificationBatch
     /**
      * Get the channel's driver.
      *
+     * @param  mixed  $channel
      * @return mixed
      */
-    protected function driver(string $channel)
+    protected function driver($channel)
     {
         $driver = $this->manager->driver($channel);
 
-        // The stock mail channel is swapped for one that sends with the batch's mailer. A mail
+        // The stock mail channel keeps the mail manager it was created with, which isn't the
+        // fake if mail was faked after the channel was created. It's swapped for one that
+        // uses the current mail manager, and that sends with the batch's mailer. A mail
         // channel registered by the application, or by another package, is used as it is.
-        if (! is_null($this->attribute?->mailer) && get_class($driver) === MailChannel::class) {
+        if (get_class($driver) === MailChannel::class && ($this->faked || ! is_null($this->attribute?->mailer))) {
             return $this->mailChannel ??= $this->manager->getContainer()
                 ->make(BatchMailChannel::class)
-                ->withDefaultMailer($this->attribute->mailer);
+                ->withDefaultMailer($this->attribute?->mailer);
         }
 
         return $driver;
     }
 
     /**
-     * Dispatch the sent and failed events for the notifications whose mail was batched.
+     * Take the notifications whose mail has been captured so far.
+     *
+     * @return array<int, array{0: mixed, 1: mixed, 2: mixed, 3: array<int, int>}>
      */
-    protected function dispatchBatchedEvents(BatchResult $result): ?Throwable
+    protected function takeBatched(): array
+    {
+        [$batched, $this->batched] = [$this->batched, []];
+
+        return $batched;
+    }
+
+    /**
+     * Dispatch the sent and failed events for the notifications whose mail was batched.
+     *
+     * @param  array<int, array{0: mixed, 1: mixed, 2: mixed, 3: array<int, int>}>  $batched
+     */
+    protected function dispatchBatchedEvents(array $batched, BatchResult $result): ?Throwable
     {
         $sent = $result->sent();
         $failures = $result->failures();
 
         $listenerException = null;
 
-        foreach ($this->batched as [$notifiable, $notification, $channel, $indexes]) {
+        foreach ($batched as [$notifiable, $notification, $channel, $indexes]) {
             try {
                 $this->withLocale($this->preferredLocale($notifiable, $notification), function () use ($notifiable, $notification, $channel, $indexes, $sent, $failures) {
                     foreach ($indexes as $index) {
@@ -263,6 +323,8 @@ class SyncNotificationBatch
                         }
                     }
 
+                    // A message the transport declined without an error has no sent message, so
+                    // its notification is sent with a null response, as Laravel would send it.
                     $responses = array_map(fn ($index) => $sent[$index] ?? null, $indexes);
 
                     $this->dispatchSentEvent($notifiable, $notification, $channel, count($responses) === 1 ? $responses[0] : $responses);
@@ -272,8 +334,6 @@ class SyncNotificationBatch
             }
         }
 
-        $this->batched = [];
-
         return $listenerException;
     }
 
@@ -282,8 +342,9 @@ class SyncNotificationBatch
      *
      * @param  mixed  $notifiable
      * @param  mixed  $notification
+     * @param  mixed  $channel
      */
-    protected function shouldSendNotification($notifiable, $notification, string $channel): bool
+    protected function shouldSendNotification($notifiable, $notification, $channel): bool
     {
         if (method_exists($notification, 'shouldSend') &&
             $notification->shouldSend($notifiable, $channel) === false) {
@@ -300,9 +361,10 @@ class SyncNotificationBatch
      *
      * @param  mixed  $notifiable
      * @param  mixed  $notification
+     * @param  mixed  $channel
      * @param  mixed  $response
      */
-    protected function dispatchSentEvent($notifiable, $notification, string $channel, $response): void
+    protected function dispatchSentEvent($notifiable, $notification, $channel, $response): void
     {
         if (method_exists($notification, 'afterSending')) {
             $notification->afterSending($notifiable, $channel, $response);
@@ -318,18 +380,27 @@ class SyncNotificationBatch
      *
      * @param  mixed  $notifiable
      * @param  mixed  $notification
+     * @param  mixed  $channel
      */
-    protected function dispatchFailedEvent($notifiable, $notification, string $channel, Throwable $exception): Throwable
+    protected function dispatchFailedEvent($notifiable, $notification, $channel, Throwable $exception): Throwable
     {
-        if ($exception instanceof HttpTransportException) {
-            $exception = new TransportException($exception->getMessage(), $exception->getCode());
-        }
+        $exception = $this->normalizeException($exception);
 
         $this->events->dispatch(
             new NotificationFailed($notifiable, $notification, $channel, ['exception' => $exception])
         );
 
         return $exception;
+    }
+
+    /**
+     * Convert an HTTP transport exception, which holds the HTTP response, as Laravel does.
+     */
+    protected function normalizeException(Throwable $exception): Throwable
+    {
+        return $exception instanceof HttpTransportException
+            ? new TransportException($exception->getMessage(), $exception->getCode())
+            : $exception;
     }
 
     /**

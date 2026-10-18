@@ -19,18 +19,19 @@ class Context
      */
     public static function key(): string
     {
+        $key = 'main';
+
         if (class_exists(Coroutine::class, false) && ($id = Coroutine::getCid()) > 0) {
-            return "coroutine:{$id}";
+            $key = "coroutine:{$id}";
+        } elseif (class_exists(\OpenSwoole\Coroutine::class, false) && ($id = \OpenSwoole\Coroutine::getCid()) > 0) {
+            $key = "coroutine:{$id}";
         }
 
-        if (class_exists(\OpenSwoole\Coroutine::class, false) && ($id = \OpenSwoole\Coroutine::getCid()) > 0) {
-            return "coroutine:{$id}";
-        }
-
+        // A fiber started within a coroutine is a context of its own within that coroutine.
         if ($fiber = Fiber::getCurrent()) {
-            return 'fiber:'.spl_object_id($fiber);
+            $key .= ':fiber:'.spl_object_id($fiber);
         }
 
-        return 'main';
+        return $key;
     }
 }

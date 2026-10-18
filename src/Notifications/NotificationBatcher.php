@@ -17,6 +17,7 @@ use Illuminate\Support\Traits\ReadsClassAttributes;
 use NineteenNinetyFour\MailBatch\Attributes\BatchMail;
 use NineteenNinetyFour\MailBatch\MailBatcher;
 use NineteenNinetyFour\MailBatch\PendingBatch;
+use WeakMap;
 
 /**
  * Sends notifications to many notifiables with their mail sent in batches.
@@ -26,9 +27,15 @@ class NotificationBatcher
     use ReadsClassAttributes;
 
     /**
-     * Indicates whether a NotificationFailed event has been dispatched.
+     * The notifications a NotificationFailed event has been dispatched for.
+     *
+     * Laravel's notification sender keeps a single flag, so that a channel which dispatches the
+     * event itself doesn't get a second one. Keying it by the notification instance being
+     * sent keeps concurrent and nested sends from resetting or setting each other's flag.
+     *
+     * @var WeakMap<object, true>
      */
-    protected bool $failedEventWasDispatched = false;
+    protected WeakMap $failed;
 
     /**
      * Create a new notification batcher instance.
@@ -39,7 +46,13 @@ class NotificationBatcher
         protected Bus $bus,
         protected MailBatcher $mail,
     ) {
-        $this->events->listen(NotificationFailed::class, fn () => $this->failedEventWasDispatched = true);
+        $this->failed = new WeakMap;
+
+        $this->events->listen(NotificationFailed::class, function (NotificationFailed $event) {
+            if (is_object($event->notification)) {
+                $this->failed[$event->notification] = true;
+            }
+        });
     }
 
     /**
@@ -66,10 +79,10 @@ class NotificationBatcher
      * @param  mixed  $notification
      * @param  array<array-key, string>  $ids
      */
-    public function sendNow(ChannelManager $manager, $notifiables, $notification, ?array $channels = null, array $ids = [], ?string $locale = null): void
+    public function sendNow(ChannelManager $manager, $notifiables, $notification, ?array $channels = null, array $ids = [], ?string $locale = null, ?string $idempotencyKey = null): void
     {
         (new SyncNotificationBatch($this, $manager, $this->events, $this->mail, $locale))
-            ->send($notifiables, $notification, $channels, $ids);
+            ->send($notifiables, $notification, $channels, $ids, $idempotencyKey);
     }
 
     /**
@@ -121,23 +134,13 @@ class NotificationBatcher
     }
 
     /**
-     * Forget that a NotificationFailed event was dispatched.
+     * Determine if a NotificationFailed event was dispatched for the given notification.
      *
      * @internal
      */
-    public function resetFailedEvent(): void
+    public function failedEventWasDispatchedFor(object $notification): bool
     {
-        $this->failedEventWasDispatched = false;
-    }
-
-    /**
-     * Determine if a NotificationFailed event was dispatched since the flag was last reset.
-     *
-     * @internal
-     */
-    public function failedEventWasDispatched(): bool
-    {
-        return $this->failedEventWasDispatched;
+        return isset($this->failed[$notification]);
     }
 
     /**
@@ -155,24 +158,5 @@ class NotificationBatcher
         }
 
         return $notifiables;
-    }
-
-    /**
-     * Get the key a notifiable's notification ID is stored under for a queued chunk.
-     *
-     * A collection of models is restored from the database when the job is processed and leaves
-     * out models deleted in the meantime, so models are keyed by their primary key instead of
-     * their position. Any other collection is serialized as is, so its keys are kept as is.
-     *
-     * @param  mixed  $notifiables
-     * @param  array-key  $key
-     * @param  mixed  $notifiable
-     * @return array-key
-     */
-    public static function notifiableIdKey($notifiables, $key, $notifiable)
-    {
-        return $notifiables instanceof EloquentCollection && $notifiable instanceof Model
-            ? $notifiable->getQueueableId()
-            : $key;
     }
 }

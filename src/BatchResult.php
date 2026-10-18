@@ -13,11 +13,13 @@ class BatchResult implements Countable
      *
      * @param  array<int, SentMessage>  $sent
      * @param  array<int, \Throwable>  $failures
+     * @param  array<int, int>  $declined
      */
     public function __construct(
         protected array $sent = [],
         protected array $failures = [],
         protected int $requests = 0,
+        protected array $declined = [],
     ) {
         //
     }
@@ -40,6 +42,29 @@ class BatchResult implements Countable
     public function failures(): array
     {
         return $this->failures;
+    }
+
+    /**
+     * Get the indexes of the messages the transport declined to send without an error.
+     *
+     * A Symfony transport returns no sent message when, for example, a MessageEvent listener
+     * rejects the message. Laravel treats such a message as neither sent nor failed.
+     *
+     * @return array<int, int>
+     */
+    public function declined(): array
+    {
+        return $this->declined;
+    }
+
+    /**
+     * Get a copy of the result with the given failures in place of its own.
+     *
+     * @param  array<int, \Throwable>  $failures
+     */
+    public function withFailures(array $failures): static
+    {
+        return new static($this->sent, $failures, $this->requests, $this->declined);
     }
 
     /**
@@ -87,6 +112,6 @@ class BatchResult implements Countable
      */
     public function count(): int
     {
-        return count($this->sent) + count($this->failures);
+        return count($this->sent) + count($this->failures) + count($this->declined);
     }
 }

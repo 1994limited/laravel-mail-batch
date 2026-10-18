@@ -4,9 +4,11 @@ namespace NineteenNinetyFour\MailBatch\Tests\Fixtures;
 
 use NineteenNinetyFour\MailBatch\Contracts\BatchTransport;
 use RuntimeException;
+use Symfony\Component\Mailer\Envelope;
 use Symfony\Component\Mailer\SentMessage;
 use Symfony\Component\Mailer\Transport\AbstractTransport;
 use Symfony\Component\Mime\Email;
+use Symfony\Component\Mime\RawMessage;
 
 class RecordingBatchTransport extends AbstractTransport implements BatchTransport
 {
@@ -24,6 +26,9 @@ class RecordingBatchTransport extends AbstractTransport implements BatchTranspor
 
     /** @var array<int, string> */
     public array $unbatchable = [];
+
+    /** @var array<int, string> */
+    public array $declined = [];
 
     public int $max = 100;
 
@@ -44,6 +49,15 @@ class RecordingBatchTransport extends AbstractTransport implements BatchTranspor
         $this->singles[] = $recipient;
 
         $message->setMessageId("id-{$recipient}");
+    }
+
+    public function send(RawMessage $message, ?Envelope $envelope = null): ?SentMessage
+    {
+        if ($message instanceof Email && in_array($message->getTo()[0]->getAddress(), $this->declined, true)) {
+            return null;
+        }
+
+        return parent::send($message, $envelope);
     }
 
     public function maxBatchSize(): int

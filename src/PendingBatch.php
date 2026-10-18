@@ -31,6 +31,11 @@ class PendingBatch
     protected Closure|int $retrySleep = 0;
 
     /**
+     * The key the idempotency key of each request is derived from.
+     */
+    protected ?string $idempotencyKey = null;
+
+    /**
      * Create a new pending batch instance.
      *
      * @param  array{size?: int, interval?: int, per_second?: int, retry?: int, retry_sleep?: int}  $config
@@ -136,6 +141,22 @@ class PendingBatch
     }
 
     /**
+     * Derive the idempotency key of each request from the given key.
+     *
+     * By default every request gets a random key that's kept across its retries. With a key
+     * of its own, sending the same messages as a batch again, for example when a queued job
+     * is retried, sends each request with the same key it was sent with the first time.
+     *
+     * @return $this
+     */
+    public function idempotencyKey(?string $key): static
+    {
+        $this->idempotencyKey = $key;
+
+        return $this;
+    }
+
+    /**
      * Send the given mailables as a batch.
      *
      * Mailables are always sent now, as part of the batch, even if they implement ShouldQueue.
@@ -206,6 +227,14 @@ class PendingBatch
     public function getAttempts(): int
     {
         return $this->attempts;
+    }
+
+    /**
+     * Get the key the idempotency key of each request is derived from.
+     */
+    public function getIdempotencyKey(): ?string
+    {
+        return $this->idempotencyKey;
     }
 
     /**

@@ -6,7 +6,6 @@ use Exception;
 use NineteenNinetyFour\MailBatch\Contracts\BatchTransport;
 use Resend\Collection;
 use Resend\Contracts\Client;
-use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Mailer\Envelope;
 use Symfony\Component\Mailer\Exception\TransportException;
 use Symfony\Component\Mailer\SentMessage;
@@ -69,7 +68,7 @@ class ResendBatchTransport extends AbstractTransport implements BatchTransport
                 $this->toPayload($email, $message->getEnvelope())
             );
 
-            if (isset($result['statusCode']) && $result['statusCode'] != Response::HTTP_OK) {
+            if (isset($result['statusCode']) && $result['statusCode'] != 200) {
                 throw new Exception($result['message']);
             }
         } catch (Exception $exception) {

@@ -4,8 +4,8 @@ Send mail and notifications in batches. Each request to your mail provider carri
 
 - `Mail::batch()` sends many mailables in as few requests as possible and returns a result for each message.
 - `Notification::batch()` sends a notification to many notifiables with its mail batched. The `NotificationSent` and `NotificationFailed` events still fire for each notifiable, carrying the provider's response.
-- Queued notifications are grouped into one job per batch, and those jobs are delayed so the rate limit holds across all your queue workers.
-- It works with every mailer. A transport without a batch API, such as SMTP, sends the messages one at a time, still paced.
+- Queued notifications are grouped into one job per batch, and those jobs are spaced out so your queue workers stay close to the rate limit.
+- It works with every mailer. Resend and Postmark get real batch requests. Any other transport, such as SMTP or SES, sends the messages one at a time, still paced.
 - It doesn't replace any of Laravel's services, so packages that extend mail or notifications keep working.
 
 Requires PHP 8.3+ and Laravel 13.
@@ -46,6 +46,30 @@ composer require resend/resend-php
 | `strict` | Rejects the whole request if any email is invalid, so nothing in it is sent. | Every email in the request fails. |
 
 `permissive` is the default because it gives a result for each message. Be careful with `strict` and queued notifications: one invalid address fails the whole batch, so the job is retried and fails the same way every time until it runs out of tries.
+
+### Postmark
+
+To send real batches through Postmark's batch API (up to 500 emails per request), install Symfony's Postmark mailer and HTTP client, then use the `postmark-batch` transport:
+
+```bash
+composer require symfony/postmark-mailer symfony/http-client
+```
+
+```php
+// config/mail.php
+'mailers' => [
+    'postmark' => [
+        'transport' => 'postmark-batch',
+        'token' => env('POSTMARK_TOKEN'), // defaults to services.postmark.token
+        'message_stream_id' => env('POSTMARK_MESSAGE_STREAM_ID'),
+        'batch' => ['size' => 500, 'per_second' => 2],
+    ],
+],
+```
+
+`postmark-batch` is Symfony's Postmark transport, so single emails are sent exactly as the `postmark` transport sends them. Tags, metadata and message streams work the same way in batches.
+
+Postmark accepts up to 50 MB per batch request. To keep every batch under that limit, emails with attachments and emails over 100 KB are sent one at a time. Postmark doesn't support idempotency keys, so a retried batch request can deliver an email twice.
 
 ## Sending mail in batches
 
@@ -128,11 +152,14 @@ The attribute only has an effect when the notification is sent with `Notificatio
 - Each notifiable is sent the notification on every channel, exactly as Laravel does it, including `shouldSend()`, `NotificationSending`, `NotificationSkipped`, locales, and one notification ID shared across a notifiable's channels.
 - Mail is captured into one batch. Once the batch has been sent, each notifiable's `NotificationSent` (with the provider's response) or `NotificationFailed` event is dispatched, and `afterSending()` is called.
 - If none of the messages could be sent, for example because the provider is down, a `BatchSendException` is thrown, so a queued job is retried. A partially sent batch doesn't throw, because retrying it would send the delivered messages again. Its failures are reported through `NotificationFailed`.
+- If the transport declines a message without an error, as Symfony does when a `MessageEvent` listener rejects it, the notifiable gets `NotificationSent` with a `null` response, as it would from Laravel.
 
 **Queued:**
 - The mail channel's jobs are grouped into one `SendBatchedMailNotifications` job per batch of notifiables. That job is Laravel's own queued-notification job, so the notification's tries, timeout, backoff, encryption and `failed()` apply to it.
-- Notifiables are only grouped when their jobs would have been queued with the same connection, queue, delay, message group and middleware. Jobs with a deduplicator are never grouped.
-- Each batch job is delayed after the previous one, so your workers stay within the mailer's rate limit.
+- Notifiables are only grouped when their jobs would have been queued with the same connection, queue, delay, message group and middleware, and their notification is in the same state. Models are only grouped with models of the same class on the same connection, so they're serialized as model identifiers. Jobs with a deduplicator are never grouped.
+- Each notifiable keeps the notification ID it was queued with, so its mail shares an ID with its other channels.
+- A batch job keeps its idempotency keys when it's retried, so `resend-batch` won't deliver its emails twice.
+- Each batch job is delayed after the previous one, so the requests are spread out. This is best effort: most queues schedule to the second, and a slow or retried job can overlap the next. For a hard limit, add a rate-limiting job middleware such as `RateLimited`.
 - Other channels, and a notifiable that can't be grouped with any other, are queued exactly as Laravel queues them.
 
 ## Testing
@@ -148,7 +175,7 @@ MailBatch::assertNotBatched();
 Mail::assertSent(Digest::class, 3);
 ```
 
-With `Mail::fake()`, no batched mail reaches a transport. With `Notification::fake()`, `Notification::batch()` is recorded the way `Notification::send()` is, so `Notification::assertSentTo()` works as usual.
+With `Mail::fake()`, no batched mail reaches a transport, including notification mail sent through a mail channel created before the fake. With `Notification::fake()`, `Notification::batch()` is recorded the way `Notification::send()` is, so `Notification::assertSentTo()` works as usual.
 
 ## Behaviour to be aware of
 
@@ -157,10 +184,10 @@ With `Mail::fake()`, no batched mail reaches a transport. With `Notification::fa
 - **Queued mailables.** A mailable that is queued, with `queue()`, `later()` or `ShouldQueue`, is queued as usual and isn't part of a `capture()` batch. Mailables passed to `send()` are always sent as part of the batch.
 - **Batch requests skip Symfony's per-message hooks.** A request with several messages calls the transport's `sendBatch()` directly, so Symfony's `MessageEvent` listeners and the transport's own throttle don't apply to it. A request with one message goes through the transport's normal `send()`.
 - **Failover, round robin and other wrapping transports** don't expose a batch API, so they send one message per request. Failover still works as usual.
-- **Retries** use the same idempotency key on every attempt of a request. `resend-batch` sends it to Resend, so a retried request isn't delivered twice. With a transport that ignores the key, a retry after a timeout can deliver a message twice.
+- **Retries** use the same idempotency key on every attempt of a request. `resend-batch` sends it to Resend, so a retried request isn't delivered twice. With a transport that ignores the key, such as `postmark-batch`, a retry after a timeout can deliver a message twice.
 - **A `MessageSent` listener that throws** doesn't stop the rest of the batch. Every request is still made, and a `BatchListenerException` holding the whole result is thrown at the end.
 - **Concurrency.** A batch only captures mail sent from the coroutine or fiber that opened it, so it's safe under Octane, Swoole and RoadRunner.
-- Batches can't be nested on the same mailer. Notification batches sent inside an open `Mail::batch()->capture()` join that batch.
+- Batches can't be nested on the same mailer. A notification batch sent inside an open `Mail::batch()->capture()` joins that batch, and its notification events are dispatched once that batch has been sent.
 
 ## Writing a batch transport
 

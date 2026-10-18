@@ -6,6 +6,7 @@ use Illuminate\Notifications\ChannelManager;
 use Illuminate\Notifications\Notification;
 use Illuminate\Notifications\SendQueuedNotifications;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Str;
 
 /**
  * Sends a notification's mail to a chunk of notifiables in a single batch.
@@ -27,6 +28,14 @@ class SendBatchedMailNotifications extends SendQueuedNotifications
     public array $notificationIds = [];
 
     /**
+     * The key the idempotency keys of the job's requests are derived from.
+     *
+     * It's serialized with the job, so a retried job sends each request with the same key as
+     * the first attempt, and a provider that supports idempotency keys won't deliver twice.
+     */
+    public string $idempotencyKey;
+
+    /**
      * Create a new job instance.
      *
      * @param  Collection  $notifiables
@@ -38,6 +47,8 @@ class SendBatchedMailNotifications extends SendQueuedNotifications
         parent::__construct($notifiables, $notification, $channels);
 
         $this->notificationIds = $notificationIds;
+
+        $this->idempotencyKey = (string) Str::uuid();
     }
 
     /**
@@ -47,6 +58,7 @@ class SendBatchedMailNotifications extends SendQueuedNotifications
     {
         $manager->getContainer()->make(NotificationBatcher::class)->sendNow(
             $manager, $this->notifiables, $this->notification, $this->channels, $this->notificationIds,
+            $this->notification->locale ?? null, $this->idempotencyKey,
         );
     }
 }

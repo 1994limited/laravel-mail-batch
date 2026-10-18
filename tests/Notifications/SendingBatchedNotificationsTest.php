@@ -262,20 +262,33 @@ class SendingBatchedNotificationsTest extends TestCase
 
     public function test_batched_notifications_inside_an_open_batch_are_captured_by_that_batch()
     {
-        $responses = [];
+        $this->transport->rejected = ['dries@laravel.com'];
+
+        $responses = $failed = [];
 
         Event::listen(NotificationSent::class, function ($event) use (&$responses) {
-            $responses[] = $event->response;
+            $responses[$this->recipientOf($event)] = $event->response->getMessageId();
         });
 
-        $result = Mail::batch()->size(2)->capture(function () {
+        Event::listen(NotificationFailed::class, function ($event) use (&$failed) {
+            $failed[] = $this->recipientOf($event);
+        });
+
+        $result = Mail::batch()->size(2)->capture(function () use (&$responses) {
             NotificationFacade::batch($this->notifiables(), new BatchedMailNotification);
+
+            // The notifications' events wait for the batch that's open to be sent.
+            $this->assertSame([], $responses);
         });
 
-        $this->assertCount(3, $result->sent());
-        $this->assertSame([null, null, null], $responses);
+        $this->assertCount(2, $result->sent());
         $this->assertSame([['taylor@laravel.com', 'dries@laravel.com']], $this->transport->batches);
         $this->assertSame(['james@laravel.com'], $this->transport->singles);
+        $this->assertSame([
+            'taylor@laravel.com' => 'id-taylor@laravel.com',
+            'james@laravel.com' => 'id-james@laravel.com',
+        ], $responses);
+        $this->assertSame(['dries@laravel.com'], $failed);
     }
 
     public function test_notifications_without_the_attribute_are_sent_one_at_a_time()
