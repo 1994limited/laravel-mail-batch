@@ -12,14 +12,14 @@
     ],
     "require": {
         "php": "^8.3",
-        "illuminate/bus": "^13.0",
-        "illuminate/collections": "^13.0",
-        "illuminate/contracts": "^13.0",
-        "illuminate/events": "^13.0",
-        "illuminate/mail": "^13.0",
-        "illuminate/notifications": "^13.0",
-        "illuminate/queue": "^13.0",
-        "illuminate/support": "^13.0"
+        "illuminate/bus": "^13.30",
+        "illuminate/collections": "^13.30",
+        "illuminate/contracts": "^13.30",
+        "illuminate/events": "^13.30",
+        "illuminate/mail": "^13.30",
+        "illuminate/notifications": "^13.30",
+        "illuminate/queue": "^13.30",
+        "illuminate/support": "^13.30"
     },
     "require-dev": {
         "laravel/pint": "^1.18",

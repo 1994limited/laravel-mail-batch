@@ -25,5 +25,6 @@ jobs:
       - run: composer update --${{ matrix.stability }} --prefer-dist --no-interaction --no-progress
 
       - run: vendor/bin/pint --test
+        if: matrix.stability == 'prefer-stable'
 
       - run: vendor/bin/phpunit
