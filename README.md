@@ -1,5 +1,9 @@
 # Laravel Mail Batch
 
+[![Latest version on Packagist](https://img.shields.io/packagist/v/1994/laravel-mail-batch.svg)](https://packagist.org/packages/1994/laravel-mail-batch)
+[![Total downloads](https://img.shields.io/packagist/dt/1994/laravel-mail-batch.svg)](https://packagist.org/packages/1994/laravel-mail-batch)
+[![License](https://img.shields.io/packagist/l/1994/laravel-mail-batch.svg)](LICENSE.md)
+
 Send mail and notifications in batches. Each request to your mail provider carries as many messages as it allows, and requests are paced to stay under your rate limit.
 
 - `Mail::batch()` sends many mailables in as few requests as possible and returns a result for each message.
@@ -8,13 +12,27 @@ Send mail and notifications in batches. Each request to your mail provider carri
 - It works with every mailer. Resend and Postmark get real batch requests. Any other transport, such as SMTP or SES, sends the messages one at a time, still paced.
 - It doesn't replace any of Laravel's services, so packages that extend mail or notifications keep working.
 
-Requires PHP 8.3+ and Laravel 13.
+## Requirements
+
+- PHP 8.3 or later
+- Laravel 13.30 or later
 
 ## Installation
+
+Install the package from [Packagist](https://packagist.org/packages/1994/laravel-mail-batch) with Composer:
 
 ```bash
 composer require 1994/laravel-mail-batch
 ```
+
+Laravel discovers the service provider automatically, so there's nothing to register and no config file to publish. Batching is configured on your existing mailers in `config/mail.php`.
+
+Then set up the mailer you send with:
+
+- **Resend** or **Postmark**: switch the mailer to the batch transport below to send real batch requests.
+- **Any other mailer**, such as SMTP, SES or Mailgun: nothing to change. `Mail::batch()` and `Notification::batch()` work straight away, sending messages one at a time at the pace you set.
+
+The package is pre-1.0, so Composer adds a `^0.1` constraint. Minor releases (0.2, 0.3) may include breaking changes until 1.0; check the [releases](https://github.com/1994limited/laravel-mail-batch/releases) before upgrading.
 
 ### Resend
 
